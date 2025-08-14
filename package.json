@@ -2,14 +2,15 @@
   "name": "crimecore-bot",
   "version": "1.0.0",
   "type": "module",
-  "main": "index.js",
+  "main": "index_with_postgres_FULL.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index_with_postgres_FULL.js"
   },
   "dependencies": {
     "grammy": "^1.27.0",
     "node-fetch": "^2.7.0",
     "node-telegram-bot-api": "^0.66.0",
+    "pg": "^8.11.0",
     "sharp": "^0.34.3"
   },
   "devDependencies": {
