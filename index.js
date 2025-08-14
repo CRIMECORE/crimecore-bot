@@ -14,6 +14,23 @@ import path from "path";
 import { fileURLToPath } from "url";
 import sharp from "sharp";
 import fetch from "node-fetch";
+import pkg from "pg";
+const { Pool } = pkg;
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS game_data (
+      key TEXT PRIMARY KEY,
+      value JSONB NOT NULL
+    );
+  `);
+}
+
 
 // === Безопасные хелперы (добавлено) ===
 function escMd(s = "") {
@@ -414,145 +431,159 @@ async function giveItemToPlayer(chatId, player, item, sourceText = "") {
 // ---- Data load/save and migration ----
 
 function saveData() {
-  try {
-    // Делаем бэкап перед записью
-    if (fs.existsSync(DATA_FILE)) {
-      const backupFile = DATA_FILE.replace(".json", "_backup.json");
-    fs.copyFileSync(DATA_FILE, backupFile);
-    console.log("Backup сохранён: data_backup.json");
+  (async () => {
+    try {
+      await initDB();
+      const payload = {
+        players,
+        clans,
+        clanBattles,
+        clanInvites
+      };
+      await pool.query(
+        `INSERT INTO game_data (key, value)
+         VALUES ($1, $2)
+         ON CONFLICT (key) DO UPDATE SET value = $2`,
+        ['main', payload]
+      );
+      console.log("✅ Данные сохранены в PostgreSQL");
+    } catch (e) {
+      console.error("❌ Ошибка записи в БД:", e);
     }
-
-    data.players = players;
-    data.clans = clans;
-    data.clanBattles = clanBattles;
-    data.clanInvites = clanInvites;
-
-    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), "utf-8");
-  } catch (e) {
-    console.error("Ошибка записи data.json:", e);
-  }
+  })();
 }
 
 function loadData() {
   try {
-    if (!fs.existsSync(DATA_FILE)) {
-      console.warn("data.json не найден — создаю пустую структуру");
-      data = { players: {}, clans: {}, clanBattles: [], clanInvites: {} };
-      players = data.players;
-      clans = data.clans;
-      clanBattles = data.clanBattles;
-      clanInvites = data.clanInvites;
-      return;
-    }
-
-    const raw = fs.readFileSync(DATA_FILE, "utf-8");
-    const parsed = JSON.parse(raw);
-
-    players = parsed.players || {};
-    clans = parsed.clans || {};
-    clanBattles = parsed.clanBattles || [];
-    clanInvites = parsed.clanInvites || {};
-
-    data = { players, clans, clanBattles, clanInvites };
-    console.log("Данные успешно загружены из data.json");
-  } catch (e) {
-    console.error("Ошибка чтения data.json — данные не будут обнулены!", e);
-    console.warn("Попробую загрузить данные из последнего бэкапа...");
-
+    if (!fs.existsfunction loadData() {
+  return (async () => {
     try {
-      const backupFiles = fs.readdirSync(path.dirname(DATA_FILE))
-        .filter(f => f.startsWith("data_backup") && f.endsWith(".json"))
-        .sort()
-        .reverse();
-
-      if (backupFiles.length > 0) {
-        const backupPath = path.join(path.dirname(DATA_FILE), backupFiles[0]);
-        const parsed = JSON.parse(fs.readFileSync(backupPath, "utf-8"));
+      await initDB();
+      const res = await pool.query(`SELECT value FROM game_data WHERE key = $1`, ['main']);
+      if (res.rows.length) {
+        const parsed = res.rows[0].value || {};
         players = parsed.players || {};
         clans = parsed.clans || {};
         clanBattles = parsed.clanBattles || [];
         clanInvites = parsed.clanInvites || {};
         data = { players, clans, clanBattles, clanInvites };
-        console.log(`Данные восстановлены из бэкапа: ${backupPath}`);
+        console.log("✅ Данные загружены из PostgreSQL");
       } else {
-        console.warn("Бэкапы не найдены — создаю пустую структуру");
-        data = { players: {}, clans: {}, clanBattles: [], clanInvites: {} };
-        players = data.players;
-        clans = data.clans;
-        clanBattles = data.clanBattles;
-        clanInvites = data.clanInvites;
-      }
-    } catch (backupErr) {
-      console.error("Ошибка при восстановлении из бэкапа:", backupErr);
-      data = { players: {}, clans: {}, clanBattles: [], clanInvites: {} };
-      players = data.players;
-      clans = data.clans;
-      clanBattles = data.clanBattles;
-      clanInvites = data.clanInvites;
-    }
-  }
-}
-
-function loadData() {
-  try {
-    if (!fs.existsSync(DATA_FILE)) {
-      players = {};
-      clans = {};
-      clanBattles = [];
-      data = { players, clans, clanBattles, clanInvites };
-      saveData();
-      return;
-    }
-    const txt = fs.readFileSync(DATA_FILE, "utf8");
-    if (!txt) {
-      players = {};
-      clans = {};
-      clanBattles = [];
-      data = { players, clans, clanBattles, clanInvites };
-      saveData();
-      return;
-    }
-    const parsed = JSON.parse(txt);
-
-    // detect if old flat format (no players key) -> migrate
-    if (parsed && typeof parsed === "object" && !parsed.players && Object.keys(parsed).length > 0) {
-      // assume old format: top-level keys are players (numeric)
-      const migratedPlayers = {};
-      for (const k of Object.keys(parsed)) {
-        const maybePlayer = parsed[k];
-        if (maybePlayer && (maybePlayer.id || /^\d+$/.test(k))) {
-          const id = maybePlayer.id ? String(maybePlayer.id) : k;
-          migratedPlayers[id] = { ...maybePlayer };
-          // ensure inventory shape
-          if (!migratedPlayers[id].inventory) migratedPlayers[id].inventory = { armor: null, helmet: null, weapon: null, mutation: null, extra: null };
+        // Fallback: однократная миграция из data.json при первом запуске
+        try {
+          const DATA_FILE = path.join(__dirname, "data.json");
+          if (fs.existsSync(DATA_FILE)) {
+            const raw = fs.readFileSync(DATA_FILE, "utf-8");
+            const old = JSON.parse(raw || "{}");
+            const migrated = {
+              players: old.players || {},
+              clans: old.clans || {},
+              clanBattles: old.clanBattles || [],
+              clanInvites: old.clanInvites || {}
+            };
+            players = migrated.players;
+            clans = migrated.clans;
+            clanBattles = migrated.clanBattles;
+            clanInvites = migrated.clanInvites;
+            data = migrated;
+            await pool.query(
+              `INSERT INTO game_data (key, value)
+               VALUES ($1, $2)
+               ON CONFLICT (key) DO UPDATE SET value = $2`,
+              ['main', migrated]
+            );
+            console.log("➡️ Импортировано из data.json и сохранено в PostgreSQL");
+          } else {
+            players = players || {};
+            clans = clans || {};
+            clanBattles = clanBattles || [];
+            clanInvites = clanInvites || {};
+            data = { players, clans, clanBattles, clanInvites };
+            console.log("ℹ️ В БД нет записей и нет data.json — создана пустая структура");
+          }
+        } catch (mErr) {
+          console.error("❌ Ошибка миграции из data.json:", mErr);
+          players = players || {};
+          clans = clans || {};
+          clanBattles = clanBattles || [];
+          clanInvites = clanInvites || {};
+          data = { players, clans, clanBattles, clanInvites };
         }
       }
-      players = migratedPlayers;
-      clans = {};
-      clanBattles = [];
+    } catch (e) {
+      console.error("❌ Ошибка загрузки из БД:", e);
+      players = players || {};
+      clans = clans || {};
+      clanBattles = clanBattles || [];
+      clanInvites = clanInvites || {};
       data = { players, clans, clanBattles, clanInvites };
-      saveData();
-      console.log("data.json: обнаружен старый формат — выполнена миграция в новый формат (players/clans).");
-      return;
     }
-
-    // otherwise expect new format
-    players = parsed.players || {};
-    clans = parsed.clans || {};
-    clanBattles = parsed.clanBattles || [];
-  clanInvites = parsed.clanInvites || {};
-    data = { players, clans, clanBattles, clanInvites };
-  } catch (e) {
-    console.error("Ошибка чтения data.json:", e);
-    players = {};
-    clans = {};
-    clanBattles = [];
-    data = { players, clans, clanBattles, clanInvites };
-  }
-}
-
-// Auto-clean similar to старый код
-function cleanDatabase() {
+  })();
+}tsfunction loadData() {
+  return (async () => {
+    try {
+      await initDB();
+      const res = await pool.query(`SELECT value FROM game_data WHERE key = $1`, ['main']);
+      if (res.rows.length) {
+        const parsed = res.rows[0].value || {};
+        players = parsed.players || {};
+        clans = parsed.clans || {};
+        clanBattles = parsed.clanBattles || [];
+        clanInvites = parsed.clanInvites || {};
+        data = { players, clans, clanBattles, clanInvites };
+        console.log("✅ Данные загружены из PostgreSQL");
+      } else {
+        // Fallback: однократная миграция из data.json при первом запуске
+        try {
+          const DATA_FILE = path.join(__dirname, "data.json");
+          if (fs.existsSync(DATA_FILE)) {
+            const raw = fs.readFileSync(DATA_FILE, "utf-8");
+            const old = JSON.parse(raw || "{}");
+            const migrated = {
+              players: old.players || {},
+              clans: old.clans || {},
+              clanBattles: old.clanBattles || [],
+              clanInvites: old.clanInvites || {}
+            };
+            players = migrated.players;
+            clans = migrated.clans;
+            clanBattles = migrated.clanBattles;
+            clanInvites = migrated.clanInvites;
+            data = migrated;
+            await pool.query(
+              `INSERT INTO game_data (key, value)
+               VALUES ($1, $2)
+               ON CONFLICT (key) DO UPDATE SET value = $2`,
+              ['main', migrated]
+            );
+            console.log("➡️ Импортировано из data.json и сохранено в PostgreSQL");
+          } else {
+            players = players || {};
+            clans = clans || {};
+            clanBattles = clanBattles || [];
+            clanInvites = clanInvites || {};
+            data = { players, clans, clanBattles, clanInvites };
+            console.log("ℹ️ В БД нет записей и нет data.json — создана пустая структура");
+          }
+        } catch (mErr) {
+          console.error("❌ Ошибка миграции из data.json:", mErr);
+          players = players || {};
+          clans = clans || {};
+          clanBattles = clanBattles || [];
+          clanInvites = clanInvites || {};
+          data = { players, clans, clanBattles, clanInvites };
+        }
+      }
+    } catch (e) {
+      console.error("❌ Ошибка загрузки из БД:", e);
+      players = players || {};
+      clans = clans || {};
+      clanBattles = clanBattles || [];
+      clanInvites = clanInvites || {};
+      data = { players, clans, clanBattles, clanInvites };
+    }
+  })();
+}leanDatabase() {
   let removed = 0;
   // normalize players
   const keys = Object.keys(players);
@@ -1911,7 +1942,7 @@ bot.on("message", async (msg) => {
 setInterval(saveData, 30000);
 
 // initial load + clean
-loadData();
+await loadData();
 cleanDatabase();
 
 console.log("Бот запущен ✅");
@@ -2337,7 +2368,8 @@ bot.onText(/\/acceptbattle/, (msg) => {
     bot.sendMessage(msg.chat.id, `➕ ${user.username} (${data.clans[user.clanId]?.name || "Без клана"}) присоединился к лобби.`);
 
     const clansInLobby = {};
-    clanBattleLobby.forEach(pid => {
+    
+clanBattleLobby.forEach(pid => {
         const pl = players[pid];
         if (pl && pl.clanId) {
             clansInLobby[pl.clanId] = (clansInLobby[pl.clanId] || 0) + 1;
